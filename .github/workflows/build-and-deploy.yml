@@ -55,6 +55,48 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Wait for Infrastructure (if triggered by workflow_run)
+        if: github.event_name == 'workflow_run'
+        run: |
+          echo "⏳ Waiting 5 minutes for infrastructure to stabilize..."
+          sleep 300
+
+      - name: Check EKS Cluster Status
+        id: check-cluster
+        run: |
+          echo "🔍 Checking if EKS cluster exists and is active..."
+          
+          max_attempts=10
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            cluster_status=$(aws eks describe-cluster \
+              --name ${{ env.CLUSTER_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query 'cluster.status' \
+              --output text 2>/dev/null || echo "NOT_FOUND")
+            
+            if [ "$cluster_status" = "ACTIVE" ]; then
+              echo "✅ Cluster is ACTIVE and ready!"
+              echo "cluster_ready=true" >> $GITHUB_OUTPUT
+              break
+            elif [ "$cluster_status" = "NOT_FOUND" ]; then
+              echo "⚠️ Cluster not found yet (attempt $attempt/$max_attempts)"
+            else
+              echo "⏳ Cluster status: $cluster_status (attempt $attempt/$max_attempts)"
+            fi
+            
+            if [ $attempt -eq $max_attempts ]; then
+              echo "❌ Cluster not ready after $max_attempts attempts"
+              echo "cluster_ready=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            echo "Waiting 30 seconds before retry..."
+            sleep 30
+            attempt=$((attempt + 1))
+          done
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
