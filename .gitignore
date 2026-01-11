@@ -12,6 +12,9 @@ override.tf.json
 .terraformrc
 terraform.rc
 
+# Ignore old EC2 terraform directory (use terraform-eks instead)
+terraform/
+
 # Sensitive files
 *.pem
 *.key
