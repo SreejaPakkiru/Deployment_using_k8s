@@ -400,3 +400,6 @@ This project is for educational purposes as part of a DevOps capstone demonstrat
 
 
 
+
+ #   W o r k f l o w   t e s t   -   s e c r e t s   c o n f i g u r e d  
+ 
