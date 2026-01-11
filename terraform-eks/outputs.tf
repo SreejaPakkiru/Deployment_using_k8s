@@ -49,17 +49,6 @@ output "ecr_repository_arn" {
   value       = aws_ecr_repository.app_repo.arn
 }
 
-# Bastion Host Outputs
-output "bastion_public_ip" {
-  description = "Bastion host public IP (Elastic IP)"
-  value       = data.aws_eip.bastion.public_ip
-}
-
-output "bastion_instance_id" {
-  description = "Bastion EC2 instance ID"
-  value       = aws_instance.bastion.id
-}
-
 output "node_group_role_arn" {
   description = "IAM role ARN of the EKS node group"
   value       = module.eks.eks_managed_node_groups["general"].iam_role_arn
