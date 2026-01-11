@@ -7,6 +7,13 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'web/**'
+      - 'nginx/**'
+      - 'k8s/**'
+      - 'terraform-eks/**'
+      - 'helm/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 env:

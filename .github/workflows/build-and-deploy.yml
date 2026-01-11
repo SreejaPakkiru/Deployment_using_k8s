@@ -8,6 +8,8 @@ on:
       - 'web/**'
       - 'nginx/**'
       - 'k8s/**'
+      - 'helm/**'
+      - '.github/workflows/build-and-deploy.yml'
   workflow_dispatch:
     inputs:
       environment:
@@ -19,6 +21,12 @@ on:
           - development
           - staging
           - production
+  workflow_run:
+    workflows: ["Deploy EKS Infrastructure"]
+    types:
+      - completed
+    branches:
+      - main
 
 env:
   AWS_REGION: ap-south-1
@@ -30,6 +38,10 @@ jobs:
   build-and-push:
     name: Build and Push Docker Images
     runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' || 
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     
     outputs:
       web_image: ${{ steps.build-web.outputs.image }}
