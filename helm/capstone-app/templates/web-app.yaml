@@ -1,0 +1,73 @@
+{{- if .Values.webApp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: web-app
+    tier: application
+spec:
+  replicas: {{ .Values.webApp.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+        tier: application
+    spec:
+      containers:
+      - name: web-app
+        image: {{ .Values.ecr.registry }}/{{ .Values.ecr.repository }}:web-{{ .Values.webApp.image.tag }}
+        imagePullPolicy: {{ .Values.webApp.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.webApp.service.targetPort }}
+          name: http
+        env:
+        {{- range .Values.webApp.env }}
+        - name: {{ .name }}
+          value: {{ .value | quote }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.webApp.resources | nindent 10 }}
+        {{- if .Values.webApp.livenessProbe.enabled }}
+        livenessProbe:
+          httpGet:
+            path: {{ .Values.webApp.livenessProbe.path }}
+            port: {{ .Values.webApp.service.targetPort }}
+          initialDelaySeconds: {{ .Values.webApp.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.webApp.livenessProbe.periodSeconds }}
+        {{- end }}
+        {{- if .Values.webApp.readinessProbe.enabled }}
+        readinessProbe:
+          httpGet:
+            path: {{ .Values.webApp.readinessProbe.path }}
+            port: {{ .Values.webApp.service.targetPort }}
+          initialDelaySeconds: {{ .Values.webApp.readinessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.webApp.readinessProbe.periodSeconds }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-service
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: web-app
+spec:
+  type: {{ .Values.webApp.service.type }}
+  ports:
+  - port: {{ .Values.webApp.service.port }}
+    targetPort: {{ .Values.webApp.service.targetPort }}
+    protocol: TCP
+    name: http
+  selector:
+    app: web-app
+{{- end }}

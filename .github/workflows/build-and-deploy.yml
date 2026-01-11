@@ -1,0 +1,276 @@
+name: Build and Deploy Application
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'web/**'
+      - 'nginx/**'
+      - 'k8s/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER_NAME: capstone-eks-cluster
+  ECR_REPOSITORY: capstone-repo
+  NAMESPACE: capstone-app
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    
+    outputs:
+      web_image: ${{ steps.build-web.outputs.image }}
+      nginx_image: ${{ steps.build-nginx.outputs.image }}
+      image_tag: ${{ steps.meta.outputs.tag }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          TAG="${SHORT_SHA}-${TIMESTAMP}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Web application
+        id: build-web
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:web-${IMAGE_TAG}"
+          LATEST="${ECR_REGISTRY}/${ECR_REPOSITORY}:web-latest"
+          
+          docker build -t ${IMAGE} -t ${LATEST} ./web
+          docker push ${IMAGE}
+          docker push ${LATEST}
+          
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "✅ Built and pushed: ${IMAGE}"
+
+      - name: Build and push NGINX
+        id: build-nginx
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:nginx-${IMAGE_TAG}"
+          LATEST="${ECR_REGISTRY}/${ECR_REPOSITORY}:nginx-latest"
+          
+          docker build -t ${IMAGE} -t ${LATEST} ./nginx
+          docker push ${IMAGE}
+          docker push ${LATEST}
+          
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "✅ Built and pushed: ${IMAGE}"
+
+      - name: Scan images for vulnerabilities
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          echo "🔍 Scanning web image..."
+          aws ecr describe-image-scan-findings \
+            --repository-name ${ECR_REPOSITORY} \
+            --image-id imageTag=web-${IMAGE_TAG} \
+            --region ${AWS_REGION} || echo "Scan in progress..."
+          
+          echo "🔍 Scanning nginx image..."
+          aws ecr describe-image-scan-findings \
+            --repository-name ${ECR_REPOSITORY} \
+            --image-id imageTag=nginx-${IMAGE_TAG} \
+            --region ${AWS_REGION} || echo "Scan in progress..."
+
+  deploy-to-eks:
+    name: Deploy to EKS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.CLUSTER_NAME }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.28.0'
+
+      - name: Create namespace if not exists
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy Redis
+        run: |
+          kubectl apply -f k8s/redis-deployment.yaml
+
+      - name: Deploy NGINX ConfigMap
+        run: |
+          kubectl apply -f k8s/nginx-configmap.yaml
+
+      - name: Update Web application deployment
+        env:
+          WEB_IMAGE: ${{ needs.build-and-push.outputs.web_image }}
+        run: |
+          kubectl apply -f k8s/web-deployment.yaml
+          kubectl set image deployment/web-app \
+            web-app=${WEB_IMAGE} \
+            -n ${{ env.NAMESPACE }}
+
+      - name: Update NGINX deployment
+        env:
+          NGINX_IMAGE: ${{ needs.build-and-push.outputs.nginx_image }}
+        run: |
+          kubectl apply -f k8s/nginx-deployment.yaml
+          kubectl set image deployment/nginx \
+            nginx=${NGINX_IMAGE} \
+            -n ${{ env.NAMESPACE }}
+
+      - name: Deploy HPA
+        run: |
+          kubectl apply -f k8s/hpa.yaml
+
+      - name: Wait for rollout
+        run: |
+          echo "⏳ Waiting for web-app rollout..."
+          kubectl rollout status deployment/web-app -n ${{ env.NAMESPACE }} --timeout=5m
+          
+          echo "⏳ Waiting for nginx rollout..."
+          kubectl rollout status deployment/nginx -n ${{ env.NAMESPACE }} --timeout=5m
+
+      - name: Get deployment status
+        if: always()
+        run: |
+          echo "📊 Deployment Status:"
+          kubectl get all -n ${{ env.NAMESPACE }}
+          
+          echo ""
+          echo "📈 HPA Status:"
+          kubectl get hpa -n ${{ env.NAMESPACE }}
+          
+          echo ""
+          echo "🔗 Service Endpoints:"
+          kubectl get svc -n ${{ env.NAMESPACE }}
+
+      - name: Get LoadBalancer URL
+        id: get-url
+        run: |
+          echo "⏳ Waiting for LoadBalancer to be assigned..."
+          sleep 30
+          
+          LB_URL=$(kubectl get svc nginx-service -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo "pending")
+          
+          echo "url=${LB_URL}" >> $GITHUB_OUTPUT
+          echo "🌐 Application URL: http://${LB_URL}"
+
+      - name: Test deployment
+        if: steps.get-url.outputs.url != 'pending'
+        run: |
+          LB_URL="${{ steps.get-url.outputs.url }}"
+          echo "🧪 Testing application..."
+          
+          # Wait for DNS propagation
+          sleep 60
+          
+          # Test endpoint
+          for i in {1..5}; do
+            if curl -s -o /dev/null -w "%{http_code}" http://${LB_URL} | grep -q "200"; then
+              echo "✅ Application is accessible!"
+              curl -s http://${LB_URL}
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying..."
+            sleep 10
+          done
+          
+          echo "⚠️ Application health check timed out"
+
+      - name: Create deployment summary
+        if: always()
+        run: |
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## 🚀 Deployment Summary
+          
+          **Environment:** ${{ github.event.inputs.environment || 'production' }}
+          **Namespace:** ${{ env.NAMESPACE }}
+          **Cluster:** ${{ env.CLUSTER_NAME }}
+          
+          ### 📦 Images Deployed
+          - **Web App:** \`${{ needs.build-and-push.outputs.web_image }}\`
+          - **NGINX:** \`${{ needs.build-and-push.outputs.nginx_image }}\`
+          
+          ### 🔗 Access Information
+          **LoadBalancer URL:** http://${{ steps.get-url.outputs.url }}
+          
+          ### 📊 Deployment Status
+          \`\`\`
+          $(kubectl get pods -n ${{ env.NAMESPACE }})
+          \`\`\`
+          
+          **Deployed by:** @${{ github.actor }}
+          **Commit:** ${{ github.sha }}
+          EOF
+
+  notify:
+    name: Send Notification
+    needs: [build-and-push, deploy-to-eks]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Deployment Success
+        if: needs.deploy-to-eks.result == 'success'
+        run: |
+          echo "✅ Deployment completed successfully!"
+          echo "Web Image: ${{ needs.build-and-push.outputs.web_image }}"
+          echo "NGINX Image: ${{ needs.build-and-push.outputs.nginx_image }}"
+
+      - name: Deployment Failed
+        if: needs.deploy-to-eks.result == 'failure'
+        run: |
+          echo "❌ Deployment failed!"
+          exit 1

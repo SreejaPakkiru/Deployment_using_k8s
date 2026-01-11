@@ -1,0 +1,85 @@
+name: Multi-Stage CI/CD Pipeline
+
+on:
+  workflow_run:
+    workflows: ["Terraform Provisioning"] 
+    types:
+      - completed
+
+env:
+  #ECR_REPOSITORY: capstone-repo
+  AWS_REGION: ap-south-1
+  TAG_VALUE: ${{ github.sha }}
+
+jobs:
+  #Build Stage
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # - name: Ensure ECR repository exists
+      #   run: |
+      #     aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} || \
+      #     aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }}
+      
+      - name: Build and Tag Docker Images
+        run:  docker compose -f compose.yaml build web1 web2 nginx
+        
+      - name: Push All Images to ECR
+        run: docker compose -f compose.yaml push web1 web2 nginx
+
+  #Deploy Stage
+  docker-deploy:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - name: Execute remote SSH commands
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.INSTANCE1_IP }},${{ secrets.INSTANCE2_IP }}
+          username: ubuntu
+          key: ${{ secrets.KEY }}
+          script: |
+
+            cd /home/ubuntu || { mkdir -p /home/ubuntu && cd /home/ubuntu; }
+  
+            # Clone repository 
+            if [ ! -d "capstone_project" ]; then
+              git clone https://github.com/SreejaPakkiru/Capstone-Project.git capstone_project
+            fi
+            cd capstone_project
+            # Ensure tests scripts can run
+            chmod -R 755 ./tests
+            #Exporting TAG_VALUE for docker-compose
+            export TAG_VALUE=${{ github.sha }}
+            docker-compose -f compose.yaml pull
+            #Building test container image
+            docker-compose -f compose.yaml build tests
+            #Starting containers
+            docker-compose -f compose.yaml up -d redis web1 web2 nginx
+            sleep 5
+            #running test container
+            docker-compose -f compose.yaml up --abort-on-container-exit --build tests
+            TEST_EXIT_CODE=$?
+            echo "Test exit code: $TEST_EXIT_CODE"
+            if [ $TEST_EXIT_CODE -ne 0 ]; then
+              echo "Tests failed! Aborting deployment..."
+              exit 1
+            fi
+  
+            echo "Tests passed successfully!"
+            docker-compose -f compose.yaml up -d --remove-orphans
+  
+            echo "Deployment completed successfully!"

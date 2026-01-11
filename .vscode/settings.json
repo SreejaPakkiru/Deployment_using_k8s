@@ -1,0 +1,31 @@
+{
+  "yaml.schemas": {
+    "https://json.schemastore.org/helmfile.json": "helm/**/values.yaml"
+  },
+  "yaml.customTags": [
+    "!And",
+    "!If",
+    "!Not",
+    "!Equals",
+    "!Or",
+    "!FindInMap sequence",
+    "!Base64",
+    "!Cidr",
+    "!Ref",
+    "!Sub",
+    "!GetAtt",
+    "!GetAZs",
+    "!ImportValue",
+    "!Select",
+    "!Split",
+    "!Join sequence"
+  ],
+  "files.associations": {
+    "helm/**/templates/*.yaml": "helm",
+    "helm/**/templates/*.yml": "helm"
+  },
+  "[helm]": {
+    "editor.formatOnSave": false
+  },
+  "terraform.validation.enableEnhancedValidation": false
+}

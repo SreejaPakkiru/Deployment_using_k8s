@@ -1,0 +1,151 @@
+name: Run Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER_NAME: capstone-eks-cluster
+  NAMESPACE: capstone-app
+
+jobs:
+  lint-and-validate:
+    name: Lint and Validate
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate Terraform
+        working-directory: terraform-eks
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false
+          terraform validate
+
+      - name: Validate Kubernetes manifests
+        run: |
+          # Install kubeval
+          wget https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz
+          tar xf kubeval-linux-amd64.tar.gz
+          sudo mv kubeval /usr/local/bin
+          
+          # Validate all manifests
+          kubeval k8s/*.yaml
+
+      - name: Validate Helm chart
+        run: |
+          helm lint helm/capstone-app
+
+      - name: Check for secrets in code
+        run: |
+          # Install trufflehog or similar
+          echo "🔍 Checking for secrets..."
+          git log --all --full-history --patch -- . | \
+            grep -iE "password|secret|key|token" || echo "No secrets found"
+
+  docker-build-test:
+    name: Test Docker Builds
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Web application
+        run: |
+          docker build -t test-web:latest ./web
+          docker images | grep test-web
+
+      - name: Build NGINX
+        run: |
+          docker build -t test-nginx:latest ./nginx
+          docker images | grep test-nginx
+
+      - name: Test Web container
+        run: |
+          docker run -d --name test-web -p 5000:5000 \
+            -e REDIS_HOST=localhost test-web:latest
+          sleep 5
+          docker logs test-web
+          docker stop test-web
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.CLUSTER_NAME }}
+
+      - name: Run integration tests
+        run: |
+          echo "🧪 Running integration tests..."
+          
+          # Check if pods are running
+          kubectl get pods -n ${{ env.NAMESPACE }}
+          
+          # Check if all pods are ready
+          kubectl wait --for=condition=ready pod \
+            -l app=web-app \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=300s
+          
+          # Get service endpoint
+          LB_URL=$(kubectl get svc nginx-service -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          
+          # Test endpoint
+          if [ -n "$LB_URL" ]; then
+            curl -f http://${LB_URL} || exit 1
+            echo "✅ Integration tests passed"
+          else
+            echo "⚠️ LoadBalancer not ready"
+          fi
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'

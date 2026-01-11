@@ -1,0 +1,132 @@
+name: Deploy with Helm
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      image_tag:
+        description: 'Image tag (leave empty for latest)'
+        required: false
+        default: 'latest'
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER_NAME: capstone-eks-cluster
+
+jobs:
+  helm-deploy:
+    name: Helm Deployment
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.CLUSTER_NAME }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: '3.13.0'
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set environment-specific values
+        id: env-values
+        run: |
+          case "${{ github.event.inputs.environment }}" in
+            development)
+              echo "replicas=1" >> $GITHUB_OUTPUT
+              echo "min_replicas=1" >> $GITHUB_OUTPUT
+              echo "max_replicas=3" >> $GITHUB_OUTPUT
+              echo "namespace=capstone-app-dev" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "replicas=2" >> $GITHUB_OUTPUT
+              echo "min_replicas=2" >> $GITHUB_OUTPUT
+              echo "max_replicas=5" >> $GITHUB_OUTPUT
+              echo "namespace=capstone-app-staging" >> $GITHUB_OUTPUT
+              ;;
+            production)
+              echo "replicas=3" >> $GITHUB_OUTPUT
+              echo "min_replicas=3" >> $GITHUB_OUTPUT
+              echo "max_replicas=10" >> $GITHUB_OUTPUT
+              echo "namespace=capstone-app" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Deploy with Helm
+        env:
+          NAMESPACE: ${{ steps.env-values.outputs.namespace }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          helm upgrade --install capstone-app ./helm/capstone-app \
+            --namespace ${NAMESPACE} \
+            --create-namespace \
+            --set webApp.image.tag=${IMAGE_TAG} \
+            --set nginx.image.tag=${IMAGE_TAG} \
+            --set webApp.replicas=${{ steps.env-values.outputs.replicas }} \
+            --set autoscaling.minReplicas=${{ steps.env-values.outputs.min_replicas }} \
+            --set autoscaling.maxReplicas=${{ steps.env-values.outputs.max_replicas }} \
+            --wait \
+            --timeout 10m
+
+      - name: Get deployment status
+        env:
+          NAMESPACE: ${{ steps.env-values.outputs.namespace }}
+        run: |
+          echo "📊 Deployment Status:"
+          helm list -n ${NAMESPACE}
+          
+          echo ""
+          kubectl get all -n ${NAMESPACE}
+          
+          echo ""
+          echo "🔗 Service URL:"
+          kubectl get svc nginx-service -n ${NAMESPACE}
+
+      - name: Run smoke tests
+        env:
+          NAMESPACE: ${{ steps.env-values.outputs.namespace }}
+        run: |
+          echo "🧪 Running smoke tests..."
+          
+          # Wait for LoadBalancer
+          sleep 60
+          
+          LB_URL=$(kubectl get svc nginx-service -n ${NAMESPACE} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          
+          if [ -z "$LB_URL" ]; then
+            echo "⚠️ LoadBalancer not ready yet"
+            exit 0
+          fi
+          
+          # Test application
+          if curl -f http://${LB_URL} > /dev/null 2>&1; then
+            echo "✅ Application is healthy!"
+          else
+            echo "❌ Health check failed"
+            exit 1
+          fi

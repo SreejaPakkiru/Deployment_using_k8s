@@ -1,0 +1,149 @@
+name: Cleanup Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      cleanup_type:
+        description: 'What to clean up'
+        required: true
+        type: choice
+        options:
+          - application-only
+          - infrastructure-only
+          - everything
+      confirm:
+        description: 'Type "DESTROY" to confirm'
+        required: true
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER_NAME: capstone-eks-cluster
+  NAMESPACE: capstone-app
+
+jobs:
+  validate:
+    name: Validate Cleanup Request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm destruction
+        if: github.event.inputs.confirm != 'DESTROY'
+        run: |
+          echo "❌ Cleanup cancelled - confirmation not provided"
+          echo "Please type 'DESTROY' in the confirm field"
+          exit 1
+
+      - name: Show cleanup plan
+        run: |
+          echo "⚠️ CLEANUP PLAN:"
+          echo "Type: ${{ github.event.inputs.cleanup_type }}"
+          echo "Region: ${{ env.AWS_REGION }}"
+          echo "Cluster: ${{ env.CLUSTER_NAME }}"
+
+  cleanup-application:
+    name: Cleanup Application
+    needs: validate
+    if: |
+      github.event.inputs.cleanup_type == 'application-only' ||
+      github.event.inputs.cleanup_type == 'everything'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.CLUSTER_NAME }} || true
+
+      - name: Delete Kubernetes resources
+        run: |
+          echo "🗑️ Deleting Kubernetes resources..."
+          kubectl delete -f k8s/ --ignore-not-found=true || true
+          
+          echo "Waiting for LoadBalancer deletion..."
+          sleep 30
+          
+          kubectl delete namespace ${{ env.NAMESPACE }} --ignore-not-found=true || true
+
+      - name: Verify cleanup
+        run: |
+          echo "Remaining resources:"
+          kubectl get all -n ${{ env.NAMESPACE }} || echo "Namespace deleted"
+
+  cleanup-infrastructure:
+    name: Cleanup Infrastructure
+    needs: [validate, cleanup-application]
+    if: |
+      always() &&
+      (github.event.inputs.cleanup_type == 'infrastructure-only' ||
+       github.event.inputs.cleanup_type == 'everything')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform-eks
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Wait for LoadBalancers to be deleted
+        if: github.event.inputs.cleanup_type == 'everything'
+        run: |
+          echo "⏳ Waiting for LoadBalancers to be fully deleted..."
+          sleep 120
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Destroy
+        run: |
+          echo "🗑️ Destroying infrastructure..."
+          terraform destroy -auto-approve
+
+      - name: Verify cleanup
+        run: |
+          echo "✅ Infrastructure destroyed"
+          aws eks list-clusters --region ${{ env.AWS_REGION }} || true
+
+  summary:
+    name: Cleanup Summary
+    needs: [cleanup-application, cleanup-infrastructure]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Create summary
+        run: |
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## 🗑️ Cleanup Summary
+          
+          **Type:** ${{ github.event.inputs.cleanup_type }}
+          **Requested by:** @${{ github.actor }}
+          **Time:** $(date -u)
+          
+          ### Results
+          - Application Cleanup: ${{ needs.cleanup-application.result }}
+          - Infrastructure Cleanup: ${{ needs.cleanup-infrastructure.result }}
+          
+          EOF

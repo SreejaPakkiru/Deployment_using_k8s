@@ -1,0 +1,49 @@
+version: '3.9'
+
+services:
+
+  redis:
+    image: 'redislabs/redismod'
+    container_name: redis
+    ports:
+      - '6379:6379'
+    
+  web1:
+    build: ./web
+    image: 954692414134.dkr.ecr.ap-south-1.amazonaws.com/capstone-repo:web1-${TAG_VALUE}
+    container_name: web1
+    restart: on-failure
+    hostname: web1
+    ports:
+      - '81:5000'
+
+  web2:
+    build: ./web
+    image: 954692414134.dkr.ecr.ap-south-1.amazonaws.com/capstone-repo:web2-${TAG_VALUE}
+    container_name: web2
+    restart: on-failure
+    hostname: web2
+    ports:
+      - '82:5000'
+
+  nginx:
+    build: ./nginx
+    image: 954692414134.dkr.ecr.ap-south-1.amazonaws.com/capstone-repo:nginx-${TAG_VALUE}
+    container_name: nginx
+    ports:
+      - '80:80'
+    depends_on:
+      - web1
+      - web2
+
+  tests:
+    build: ./tests
+    image: capstone-tests:latest #test container is not pushed into ECR
+    container_name: test-runner
+    depends_on:
+      - web1
+      - web2
+      - nginx
+    volumes:
+      - ./tests:/tests        
+    entrypoint: ["/tests/run-tests.sh"]

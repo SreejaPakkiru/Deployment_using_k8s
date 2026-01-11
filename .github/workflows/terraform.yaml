@@ -1,0 +1,47 @@
+name: Terraform Provisioning
+
+on:
+  workflow_dispatch: 
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.7.0
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: ./terraform
+        run: terraform apply -auto-approve
+
+      - name: Print Terraform Outputs
+        working-directory: ./terraform
+        run: |
+          
+          echo "EC2 Public IPs:"
+          terraform output ec2_public_ips
+          echo "ECR Repository URL:"
+          terraform output ecr_repository_urls
+          
