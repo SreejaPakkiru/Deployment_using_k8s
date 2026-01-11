@@ -99,3 +99,10 @@ variable "allowed_cidr_blocks" {
   type        = list(string)
   default     = ["0.0.0.0/0"] # Restrict this in production
 }
+
+# Bastion Host Configuration
+variable "bastion_eip_allocation_id" {
+  description = "Elastic IP allocation ID for bastion host"
+  type        = string
+  default     = "eipalloc-075fc1463d4dfdec1"
+}
